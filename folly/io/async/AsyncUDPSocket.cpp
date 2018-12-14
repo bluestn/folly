@@ -427,70 +427,75 @@ int AsyncUDPSocket::connect(const folly::SocketAddress& address) {
 }
 
 void AsyncUDPSocket::handleRead() noexcept {
-  void* buf{nullptr};
-  size_t len{0};
 
-  if (handleErrMessages()) {
-    return;
-  }
+  // try multi recvfrom in one epoll callback, to reduce unnessesary epoll 
+  for( int i = 0; i < 10; i++ )
+  {
+    void* buf{nullptr};
+    size_t len{0};
 
-  if (fd_ == NetworkSocket()) {
-    // The socket may have been closed by the error callbacks.
-    return;
-  }
-
-  readCallback_->getReadBuffer(&buf, &len);
-  if (buf == nullptr || len == 0) {
-    AsyncSocketException ex(
-        AsyncSocketException::BAD_ARGS,
-        "AsyncUDPSocket::getReadBuffer() returned empty buffer");
-
-    auto cob = readCallback_;
-    readCallback_ = nullptr;
-
-    cob->onReadError(ex);
-    updateRegistration();
-    return;
-  }
-
-  struct sockaddr_storage addrStorage;
-  socklen_t addrLen = sizeof(addrStorage);
-  memset(&addrStorage, 0, size_t(addrLen));
-  struct sockaddr* rawAddr = reinterpret_cast<sockaddr*>(&addrStorage);
-  rawAddr->sa_family = localAddress_.getFamily();
-
-  ssize_t bytesRead =
-      netops::recvfrom(fd_, buf, len, MSG_TRUNC, rawAddr, &addrLen);
-  if (bytesRead >= 0) {
-    clientAddress_.setFromSockaddr(rawAddr, addrLen);
-
-    if (bytesRead > 0) {
-      bool truncated = false;
-      if ((size_t)bytesRead > len) {
-        truncated = true;
-        bytesRead = ssize_t(len);
-      }
-
-      readCallback_->onDataAvailable(
-          clientAddress_, size_t(bytesRead), truncated);
-    }
-  } else {
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      // No data could be read without blocking the socket
+    if (handleErrMessages()) {
       return;
     }
 
-    AsyncSocketException ex(
-        AsyncSocketException::INTERNAL_ERROR, "::recvfrom() failed", errno);
+    if (fd_ == NetworkSocket()) {
+      // The socket may have been closed by the error callbacks.
+      return;
+    }
 
-    // In case of UDP we can continue reading from the socket
-    // even if the current request fails. We notify the user
-    // so that he can do some logging/stats collection if he wants.
-    auto cob = readCallback_;
-    readCallback_ = nullptr;
+    readCallback_->getReadBuffer(&buf, &len);
+    if (buf == nullptr || len == 0) {
+      AsyncSocketException ex(
+          AsyncSocketException::BAD_ARGS,
+          "AsyncUDPSocket::getReadBuffer() returned empty buffer");
 
-    cob->onReadError(ex);
-    updateRegistration();
+      auto cob = readCallback_;
+      readCallback_ = nullptr;
+
+      cob->onReadError(ex);
+      updateRegistration();
+      return;
+    }
+
+    struct sockaddr_storage addrStorage;
+    socklen_t addrLen = sizeof(addrStorage);
+    memset(&addrStorage, 0, size_t(addrLen));
+    struct sockaddr* rawAddr = reinterpret_cast<sockaddr*>(&addrStorage);
+    rawAddr->sa_family = localAddress_.getFamily();
+
+    ssize_t bytesRead =
+        netops::recvfrom(fd_, buf, len, MSG_TRUNC, rawAddr, &addrLen);
+    if (bytesRead >= 0) {
+      clientAddress_.setFromSockaddr(rawAddr, addrLen);
+
+      if (bytesRead > 0) {
+        bool truncated = false;
+        if ((size_t)bytesRead > len) {
+          truncated = true;
+          bytesRead = ssize_t(len);
+        }
+
+        readCallback_->onDataAvailable(
+            clientAddress_, size_t(bytesRead), truncated);
+      }
+    } else {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        // No data could be read without blocking the socket
+        return;
+      }
+
+      AsyncSocketException ex(
+          AsyncSocketException::INTERNAL_ERROR, "::recvfrom() failed", errno);
+
+      // In case of UDP we can continue reading from the socket
+      // even if the current request fails. We notify the user
+      // so that he can do some logging/stats collection if he wants.
+      auto cob = readCallback_;
+      readCallback_ = nullptr;
+
+      cob->onReadError(ex);
+      updateRegistration();
+    }
   }
 }
 
